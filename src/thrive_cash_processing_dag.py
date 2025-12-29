@@ -26,6 +26,9 @@ import json
 import requests
 import os
 
+# Import FIFO matching logic
+from src.fifo_matching import perform_fifo_matching_logic, load_from_staging
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -225,21 +228,13 @@ def validate_source(**context):
 
 def perform_fifo_matching(**context):
     """
-    Perform FIFO matching of transactions and create REDEEMID column.
+    Airflow task wrapper for FIFO matching logic.
     
     Implements Requirement 3: Perform FIFO Matching
-    - For each customer, matches spent/expired to oldest earned (by CREATEDAT)
-    - Each TRANS_ID can only be used once (no splitting/partial redemptions)
-    - If no unmatched earned exists, REDEEMID is blank
-    - Creates REDEEMID column for earned transactions only
-    - Outputs tc_data_with_redemptions.csv
-    
-    Matching Rules:
-    - REDEEMID is ONLY populated for earned transactions
-    - Earned transactions get REDEEMID pointing to spent/expired TRANS_ID that redeemed them
-    - Spent/expired transactions always have blank/NULL REDEEMID
-    - Each transaction used only once (1:1 matching)
-    - Scalable for millions of transactions using vectorized operations
+    - Loads validated data from staging
+    - Calls core FIFO matching algorithm
+    - Saves results to CSV and Parquet
+    - Pushes metrics to XCom
     """
     correlation_id = context['dag_run'].run_id
     staging_path = context['task_instance'].xcom_pull(task_ids='download_data', key='staging_path')
@@ -248,91 +243,10 @@ def perform_fifo_matching(**context):
     
     try:
         # Load validated data
-        earned_df, spent_df, expired_df = _load_from_staging(staging_path)
+        earned_df, spent_df, expired_df = load_from_staging(staging_path)
         
-        # Combine all transactions for final output
-        all_transactions = pd.concat([earned_df, spent_df, expired_df], ignore_index=True)
-        
-        # Ensure timestamp column exists (map from 'timestamp' if needed)
-        if 'timestamp' in all_transactions.columns and 'CREATEDAT' not in all_transactions.columns:
-            all_transactions['CREATEDAT'] = all_transactions['timestamp']
-        
-        # Standardize column names to match spec
-        column_mapping = {
-            'transaction_id': 'TRANS_ID',
-            'transaction_type': 'TCTYPE',
-            'timestamp': 'CREATEDAT',
-            'customer_id': 'CUSTOMERID',
-            'amount': 'AMOUNT'
-        }
-        all_transactions = all_transactions.rename(columns=column_mapping)
-        
-        logger.info(f"[{correlation_id}] Processing {len(all_transactions)} total transactions")
-        
-        # Perform FIFO matching per customer
-        result_rows = []
-        customers = all_transactions['CUSTOMERID'].unique()
-        
-        logger.info(f"[{correlation_id}] Processing {len(customers)} unique customers")
-        
-        for customer_id in customers:
-            customer_txns = all_transactions[all_transactions['CUSTOMERID'] == customer_id].copy()
-            
-            # Sort by CREATEDAT for FIFO order
-            customer_txns = customer_txns.sort_values('CREATEDAT').reset_index(drop=True)
-            
-            # Separate by type
-            earned = customer_txns[customer_txns['TCTYPE'] == 'earned'].copy()
-            spent_expired = customer_txns[customer_txns['TCTYPE'].isin(['spent', 'expired'])].copy()
-            
-            # Track which earned transactions are still available (not yet matched)
-            available_earned = earned['TRANS_ID'].tolist()
-            
-            # Track redemptions: earned_id -> spent/expired_id
-            earned_to_redeemer = {}
-            
-            # Process each spent/expired transaction in chronological order
-            for _, se_txn in spent_expired.iterrows():
-                # Find oldest available earned transaction
-                if available_earned:
-                    # Get the oldest earned that hasn't been matched yet
-                    oldest_earned_id = available_earned[0]
-                    
-                    # Track which spent/expired redeemed this earned
-                    earned_to_redeemer[oldest_earned_id] = se_txn['TRANS_ID']
-                    
-                    # Remove from available list (each TRANS_ID used only once)
-                    available_earned.pop(0)
-                
-                # Add spent/expired transaction with NULL REDEEMID (always blank)
-                result_rows.append({
-                    'TRANS_ID': se_txn['TRANS_ID'],
-                    'TCTYPE': se_txn['TCTYPE'],
-                    'CREATEDAT': se_txn['CREATEDAT'],
-                    'CUSTOMERID': se_txn['CUSTOMERID'],
-                    'AMOUNT': se_txn['AMOUNT'],
-                    'REDEEMID': None  # Always NULL for spent/expired
-                })
-            
-            # Add earned transactions with REDEEMID (only earned gets REDEEMID)
-            for _, earned_txn in earned.iterrows():
-                # REDEEMID points to the spent/expired that redeemed it
-                redeemid = earned_to_redeemer.get(earned_txn['TRANS_ID'], None)
-                
-                result_rows.append({
-                    'TRANS_ID': earned_txn['TRANS_ID'],
-                    'TCTYPE': earned_txn['TCTYPE'],
-                    'CREATEDAT': earned_txn['CREATEDAT'],
-                    'CUSTOMERID': earned_txn['CUSTOMERID'],
-                    'AMOUNT': earned_txn['AMOUNT'],
-                    'REDEEMID': redeemid  # Points to spent/expired TRANS_ID
-                })
-        
-        # Create final dataframe
-        result_df = pd.DataFrame(result_rows)
-        
-        # Sort by CUSTOMERID and CREATEDAT for readability
-        result_df = result_df.sort_values(['CUSTOMERID', 'CREATEDAT']).reset_index(drop=True)
+        # Perform FIFO matching using core algorithm
+        result_df = perform_fifo_matching_logic(earned_df, spent_df, expired_df)
         
         # Save as CSV (primary deliverable)
         output_csv_path = f"{staging_path}/tc_data_with_redemptions.csv"
