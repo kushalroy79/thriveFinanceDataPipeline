@@ -20,90 +20,13 @@ Key Rules:
 import pandas as pd
 import pytest
 from datetime import datetime
+import sys
+import os
 
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-def perform_fifo_matching_logic(earned_df, spent_df, expired_df):
-    """
-    Simplified FIFO matching logic extracted from the DAG for testing.
-    This is the core algorithm without Airflow dependencies.
-    
-    Rules:
-    - 1:1 matching (no partial redemptions)
-    - Each TRANS_ID used only once
-    - Oldest unmatched earned matched first (FIFO)
-    - REDEEMID only populated for earned transactions
-    """
-    # Combine all transactions
-    all_transactions = pd.concat([earned_df, spent_df, expired_df], ignore_index=True)
-    
-    # Standardize column names
-    if 'timestamp' in all_transactions.columns and 'CREATEDAT' not in all_transactions.columns:
-        all_transactions['CREATEDAT'] = all_transactions['timestamp']
-    
-    column_mapping = {
-        'transaction_id': 'TRANS_ID',
-        'transaction_type': 'TCTYPE',
-        'timestamp': 'CREATEDAT',
-        'customer_id': 'CUSTOMERID',
-        'amount': 'AMOUNT'
-    }
-    all_transactions = all_transactions.rename(columns=column_mapping)
-    
-    # Perform FIFO matching per customer
-    result_rows = []
-    customers = all_transactions['CUSTOMERID'].unique()
-    
-    for customer_id in customers:
-        customer_txns = all_transactions[all_transactions['CUSTOMERID'] == customer_id].copy()
-        customer_txns = customer_txns.sort_values('CREATEDAT').reset_index(drop=True)
-        
-        earned = customer_txns[customer_txns['TCTYPE'] == 'earned'].copy()
-        spent_expired = customer_txns[customer_txns['TCTYPE'].isin(['spent', 'expired'])].copy()
-        
-        # Track which earned transactions are still available (not yet matched)
-        available_earned = earned['TRANS_ID'].tolist()
-        
-        # Track redemptions: earned_id -> spent/expired_id
-        earned_to_redeemer = {}
-        
-        # Process each spent/expired transaction in chronological order
-        for _, se_txn in spent_expired.iterrows():
-            # Find oldest available earned transaction
-            if available_earned:
-                # Get the oldest earned that hasn't been matched yet
-                oldest_earned_id = available_earned[0]
-                
-                # Track which spent/expired redeemed this earned
-                earned_to_redeemer[oldest_earned_id] = se_txn['TRANS_ID']
-                
-                # Remove from available list (each TRANS_ID used only once)
-                available_earned.pop(0)
-            
-            # Add spent/expired transaction with NULL REDEEMID (always blank)
-            result_rows.append({
-                'TRANS_ID': se_txn['TRANS_ID'],
-                'TCTYPE': se_txn['TCTYPE'],
-                'CREATEDAT': se_txn['CREATEDAT'],
-                'CUSTOMERID': se_txn['CUSTOMERID'],
-                'AMOUNT': se_txn['AMOUNT'],
-                'REDEEMID': None  # Always NULL for spent/expired
-            })
-        
-        # Add earned transactions with REDEEMID (only earned gets REDEEMID)
-        for _, earned_txn in earned.iterrows():
-            # REDEEMID points to the spent/expired that redeemed it
-            redeemid = earned_to_redeemer.get(earned_txn['TRANS_ID'], None)
-            
-            result_rows.append({
-                'TRANS_ID': earned_txn['TRANS_ID'],
-                'TCTYPE': earned_txn['TCTYPE'],
-                'CREATEDAT': earned_txn['CREATEDAT'],
-                'CUSTOMERID': earned_txn['CUSTOMERID'],
-                'AMOUNT': earned_txn['AMOUNT'],
-                'REDEEMID': redeemid
-            })
-    
-    return pd.DataFrame(result_rows)
+from src.fifo_matching import perform_fifo_matching_logic
 
 
 # Test Case 1: Simple One-to-One Matching
