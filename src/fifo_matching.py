@@ -50,10 +50,6 @@ def perform_fifo_matching_logic(earned_df: pd.DataFrame,
     # Combine all transactions for final output
     all_transactions = pd.concat([earned_df, spent_df, expired_df], ignore_index=True)
     
-    # Ensure timestamp column exists (map from 'timestamp' if needed)
-    if 'timestamp' in all_transactions.columns and 'CREATEDAT' not in all_transactions.columns:
-        all_transactions['CREATEDAT'] = all_transactions['timestamp']
-    
     # Standardize column names to match spec
     column_mapping = {
         'transaction_id': 'TRANS_ID',
