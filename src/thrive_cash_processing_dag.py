@@ -175,7 +175,7 @@ def validate_source(**context):
     
     try:
         # Load data from staging
-        earned_df, spent_df, expired_df = _load_from_staging(staging_path)
+        earned_df, spent_df, expired_df = load_from_staging(staging_path)
         
         validation_errors = []
         
@@ -304,7 +304,7 @@ def validate_results(**context):
     
     try:
         # Load original data
-        earned_df, spent_df, expired_df = _load_from_staging(staging_path)
+        earned_df, spent_df, expired_df = load_from_staging(staging_path)
         
         # Load matching results
         result_df = pd.read_parquet(output_parquet_path)
@@ -634,14 +634,6 @@ def _save_to_staging(staging_path, earned_df, spent_df, expired_df):
     earned_df.to_parquet(f"{staging_path}/earned.parquet", index=False)
     spent_df.to_parquet(f"{staging_path}/spent.parquet", index=False)
     expired_df.to_parquet(f"{staging_path}/expired.parquet", index=False)
-
-
-def _load_from_staging(staging_path):
-    """Load dataframes from staging location."""
-    earned_df = pd.read_parquet(f"{staging_path}/earned.parquet")
-    spent_df = pd.read_parquet(f"{staging_path}/spent.parquet")
-    expired_df = pd.read_parquet(f"{staging_path}/expired.parquet")
-    return earned_df, spent_df, expired_df
 
 
 def _validate_transactions(df, transaction_type, correlation_id):
